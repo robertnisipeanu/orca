@@ -73,7 +73,6 @@ private class TerminalReactEditText(
     private val reactContext: ThemedReactContext,
 ) : ReactEditText(reactContext) {
   private var mutationIsComposing: Boolean? = null
-  private var mutationDispatched = false
 
   override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? {
     val connection = super.onCreateInputConnection(outAttrs) ?: return null
@@ -82,10 +81,10 @@ private class TerminalReactEditText(
 
   fun dispatchTextChange(text: CharSequence, start: Int, before: Int, count: Int) {
     if (before == 0 && count == 0) return
+    if (mutationIsComposing != null) return
     val end = start + count
     if (start < 0 || end < start || end > text.length) return
     dispatch(text.toString(), text.subSequence(start, end).toString(), start, start + before)
-    mutationDispatched = true
   }
 
   fun mutateInput(
@@ -95,10 +94,9 @@ private class TerminalReactEditText(
       mutation: () -> Boolean,
   ): Boolean {
     mutationIsComposing = isComposing
-    mutationDispatched = false
     return try {
       val consumed = mutation()
-      if (consumed && !mutationDispatched && range != null) {
+      if (consumed && range != null) {
         text?.toString()?.let { dispatch(it, replacementText, range.first, range.second) }
       }
       consumed
@@ -142,9 +140,17 @@ private class TerminalInputConnection(
     private val editText: TerminalReactEditText,
 ) : InputConnectionWrapper(target, false) {
   override fun setComposingText(text: CharSequence, newCursorPosition: Int): Boolean {
-    return editText.mutateInput(true, text.toString(), editText.replacementRange()) {
+    val range = editText.replacementRange()
+    val consumed = editText.mutateInput(true, text.toString(), range) {
       super.setComposingText(text, newCursorPosition)
     }
+    // Let React Native deliver its synthetic Backspace while the IME still owns it.
+    if (text.isEmpty() && consumed) {
+      editText.post {
+        if (editText.composingRange() == null) editText.mutateInput(false, "", range) { true }
+      }
+    }
+    return consumed
   }
 
   override fun commitText(text: CharSequence, newCursorPosition: Int): Boolean {
